@@ -19,6 +19,7 @@ Future features to add:
 1.  Have the script traverse the directories and subdirectories in alphabetical order.  The current order seems to be the order that the movie files were created, so there is no way for someone to casually look at the output and see that a particular file is remuxing and have a clue how far long it is.
 2.  Consider adding a counter.  Adding code that has the script identify how many mkvs it needs to scan for the entire job and then adding a log entry at each file that says something like "(50/250) complete" when each video file completes would be useful for the user.
 3.  Clean up the output of -h to be a bit more "user friendly".
+4.  Allow for providing a single filename from the command line instead of a directory.
 
 
 I am not an expert python coder so any help with bugs or features from the community is much appreciated!
