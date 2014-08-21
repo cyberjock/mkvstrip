@@ -63,8 +63,7 @@ RENAME_TV = True
 # Note: If RENAME_MOVIE is set and your files *only* need a title change that a remux will still be triggered.  So use with caution. (see bug list)
 RENAME_MOVIE = False
 
-# Known bugs and limitations with this version:
-# 1. 
+# Known bugs and limitations are avaible from http://github.com/cyberjock/mkvstrip
 
 for i in [
         'MKVMERGE_BIN',
