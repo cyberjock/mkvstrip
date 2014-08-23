@@ -18,6 +18,7 @@ Known bugs:
 2.  If RENAME_TV or RENAME_MOVIE is set then every time the script is run every file is remuxed.  This can add considerable time to a directory being processed since every time the script is run every file *will* be remuxed.
 3.  If the output of video, audio, and subtitle track titles have special characters they will be garbled in the screen and log output.  Note that the files do not end up with garbled entries.  Character sets probably need looked into.
 4.  Using the variable os.path.dirname(os.path.realpath(__file__)) which should be for the current directory throws an error.
+5.  Movies like Alien³, if titled properly, will silently fail with no error recorded in the log.  This likely has to do with the characterset used in the filename.
 
 Future features to add:
 
