@@ -2,7 +2,7 @@
 
 # Welcome to mkvstrip.py.  This script can go through a folder looking for extraneous audio and subtitle tracks and removes them.  Additionally you can choose to overwrite the title field of the mkv.
 
-# Version = 0.9 (8/21/2014)
+# Version = 0.9.1 (9/11/2014)
 # The latest version can always be found at https://github.com/cyberjock/mkvstrip
 
 # This python script has the following requirements:
@@ -23,11 +23,18 @@
 
 # For help with the command line parameters use the -h parameter.
 
+import os, re, sys, atexit, subprocess
+from datetime import datetime
+from StringIO import StringIO
+from argparse import ArgumentParser
+
 # Location for mkvmerge executable binary.
 # Note that the location always uses the / versus the \ as appropriate for some OSes.
 # Windows is usually set to something like C:/Program Files (x86)/MkvToolNix/mkvmerge.exe
 # For a FreeNAS jail (and FreeBSD) this usually something like /usr/local/bin/mkvmerge
 MKVMERGE_BIN = '/usr/local/bin/mkvmerge'
+MKVINFO_BIN = '/usr/local/bin/mkvinfo'
+MKVPROPEDIT_BIN = '/usr/local/bin/mkvpropedit'
 
 # Log errors to file.  Log file will be in the same directory as mkvstrip.py and will include the year, month, day and time that mkvstrip is invoked.
 LOG = True
@@ -36,11 +43,11 @@ LOG = True
 # Note that the location always uses the / versus the \ for location despite what the OS uses (*cough* Windows).
 # Windows is usually something like C:/Movies
 # FreeNAS jails (and FreeBSD) should be something like /mnt/tank/Movies or similar.
-# DIR = os.path.dirname(os.path.realpath(__file__))
+DIR = os.path.dirname(os.path.realpath(__file__))
 # DIR = '/mnt/tank/Entertainment/Movies'
 
 # The below parameter lets mkvstrip go through the motions of what it would do but won't actually change any files.  This allows you to review the logs and ensure that everything in the log is what you'd actually like to do before actually doing it. (see bug list)
-DRY_RUN = False
+DRY_RUN = True
 
 # PRESERVE_TIMESTAMP keeps the timestamps of the old file if set.  This prevents you from having an entire library that has a date/time stamp of today.  Recommended to be enabled.
 # Note that if Plex has already inventoried your files it may or may not like this setting and may or may not like you remuxing your entire library suddenly. I recommend you stop Plex and then do an analysis of your library afterwards. 
@@ -57,16 +64,18 @@ LOG_MISSING_SUBTITLE = True
 
 # Rewrite the title field of mkv files to include the immediate parent directory.  If set to true it will rename the title field of the MKV to be the in the format of "(parent directory) - (name of video file without .mkv extension)" as this is the most common organization of TV shows for Plex.  This setting is mutually exclusive of RENAME_MOVIE.
 # Note: If RENAME_TV is set and your files *only* need a title change that a remux will still be triggered.  So use with caution.  (See bug list)
-RENAME_TV = True
+RENAME_TV = False
 
 # Rewrite the title field of mkv files to include the video file name without the .mkv extension.  This setting is mutually exclusive of RENAME_TV.
 # Note: If RENAME_MOVIE is set and your files *only* need a title change that a remux will still be triggered.  So use with caution. (see bug list)
 RENAME_MOVIE = False
 
-# Known bugs and limitations are avaible from http://github.com/cyberjock/mkvstrip
+# Known bugs and limitations are available from http://github.com/cyberjock/mkvstrip
 
 for i in [
         'MKVMERGE_BIN',
+        'MKVINFO_BIN',
+        'MKVPROPEDIT_BIN',
         'LOG',
         'DIR',
         'DRY_RUN',
@@ -78,11 +87,6 @@ for i in [
         'RENAME_MOVIE' ]:
     if i not in globals():
         raise RuntimeError('%s configuration variable is required.' % (i))
-
-import os, re, sys, atexit, subprocess
-from datetime import datetime
-from StringIO import StringIO
-from argparse import ArgumentParser
 
 class Logger(object):
     _files = dict()
@@ -184,6 +188,8 @@ rename.add_argument('-e', '--rename-movie', default=None, action='store_true', h
 parser.add_argument('--no-rename-tv', default=None, action='store_false', dest='rename_tv')
 parser.add_argument('--no-rename-movie', default=None, action='store_false', dest='rename_movie')
 parser.add_argument('-b', '--mkvmerge-bin', default=MKVMERGE_BIN, help='Path to mkvmerge binary.')
+parser.add_argument('-i', '--mkvinfo-bin', default=MKVINFO_BIN, help='Path to mkvinfo binary.')
+parser.add_argument('-t', '--mkvpropedit-bin', default=MKVPROPEDIT_BIN, help='Path to mkvpropedit binary.')
 args = parser.parse_args()
 
 LOG = LOG if args.log is None else args.log
@@ -197,6 +203,12 @@ Logger.write('Running', os.path.basename(__file__), 'with configuration:')
 
 MKVMERGE_BIN = os.path.abspath(args.mkvmerge_bin)
 Logger.write('MKVMERGE_BIN =', MKVMERGE_BIN)
+
+MKVINFO_BIN = os.path.abspath(args.mkvinfo_bin)
+Logger.write('MKVINFO_BIN =', MKVINFO_BIN)
+
+MKVPROPEDIT_BIN = os.path.abspath(args.mkvpropedit_bin)
+Logger.write('MKVPROPEDIT_BIN =', MKVPROPEDIT_BIN)
 
 DIR = os.path.abspath(args.dir)
 Logger.write('DIR =', DIR)
@@ -228,148 +240,182 @@ Logger.write('RENAME_MOVIE =', RENAME_MOVIE)
 if RENAME_TV is True and RENAME_MOVIE is True:
     raise RuntimeError('Setting RENAME_TV = True and RENAME_MOVIE = True at the same time is not allowed.')
 
+TITLE_RE = re.compile(r'Title: (.+?)\n')
 NAME_RE = re.compile(r'^(.+)\.mkv$', flags=re.IGNORECASE)
 VIDEO_RE = re.compile(r'^Track ID (?P<id>\d+): video \([\w/\.-]+\) [number:\d+ uid:\d+ codec_id:[\w/]+ codec_private_length:\d+ codec_private_data:[a-f\d]+ language:(?P<language>[a-z]{3})(?: track_name:(?P<name>.+))? pixel_dimensions')
 AUDIO_RE = re.compile(r'^Track ID (?P<id>\d+): audio \([\w/]+\) [number:\d+ uid:\d+ codec_id:[\w/]+ codec_private_length:\d+ language:(?P<language>[a-z]{3})(?: track_name:(?P<name>.+))? default_track:(?P<default>[01]{1})')
 SUBTITLE_RE = re.compile(r'^Track ID (?P<id>\d+): subtitles \([\w/]+\) [number:\d+ uid:\d+ codec_id:[\w/]+ codec_private_length:\d+ language:(?P<language>[a-z]{3})(?: track_name:(?P<name>.+))? default_track:(?P<default>[01]{1}) forced_track:([01]{1})')
 
-for dirpath, dirnames, filenames in os.walk(DIR):
-    for filename in filenames:
+processList = list()
+if os.path.isfile(DIR) is True:
+    processList.append(DIR)
+else:
+    # Walk through the directory and sort by filename
+    unsortedList = list()
+    for dirpath, dirnames, filenames in os.walk(DIR):
+        mkvFilenames = [filename for filename in filenames if filename.lower().endswith('.mkv')]
+        mkvFilenames.sort()
+        unsortedList.append((dirpath, mkvFilenames))
+    
+    # Now sort by Directory and append to processList
+    unsortedList.sort(key=lambda dirTuple: dirTuple[0])
+    for dirpath, filenames in unsortedList:
+        for filename in filenames:
+            processList.append(os.path.join(dirpath, filename))
 
-        # Process MKV files only
-        if not filename.lower().endswith('.mkv'):
-            continue
+totalMKVs = len(processList)
+Logger.write('Starting processing of %s Videos' % totalMKVs)
+counter = 0
 
-        Logger.write('============')
+for path in processList:
+    counter += 1
+    Logger.write('==========================================')
 
-        # Path to file
-        path = os.path.join(dirpath, filename)
+    # Attempt to identify file
+    Logger.write('Identifying video (%s/%s)' % (counter,totalMKVs), path)
+    cmd = [ MKVMERGE_BIN, '--identify-verbose', path ]
+    try:
+        result = subprocess.check_output(cmd)
+    except subprocess.CalledProcessError:
+        Logger.write('Failed to identify', path, stderr=True)
+        continue
 
-        # Attempt to identify file
-        Logger.write('Identifying', path)
-        cmd = [ MKVMERGE_BIN, '--identify-verbose', path ]
-        try:
-            result = subprocess.check_output(cmd)
-        except subprocess.CalledProcessError:
-            Logger.write('Failed to identify', path, stderr=True)
-            continue
-
-        # Find video, audio, and subtitle tracks
-        video = list()
-        audio = list()
-        subtitles = list()
-        Logger.write('Searching for video, audio, and subtitle tracks...')
-        for line in StringIO(result):
-            matches = AUDIO_RE.match(line)
-            if matches is not None:
-                audio.append(AudioTrack(**matches.groupdict()))
-            else:
-                matches = SUBTITLE_RE.match(line)
-                if matches is not None:
-                    subtitles.append(SubtitleTrack(**matches.groupdict()))
-                else:
-                    matches = VIDEO_RE.match(line)
-                    if matches is not None:
-                        video.append(VideoTrack(**matches.groupdict()))
-        Logger.write('Found video track(s):')
-        for i in video:
-            Logger.write(i, indent=4)
-        Logger.write('Found audio track(s):')
-        for i in audio:
-            Logger.write(i, indent=4)
-        Logger.write('Found subtitle track(s):')
-        for i in subtitles:
-            Logger.write(i, indent=4)
-
-        # Filter out tracks that don't match languages specified.
-        Logger.write('Filtering audio track(s)...')
-        audio_lang = filter(lambda x: x.language in AUDIO_LANG, audio)
-        Logger.write('Removing audio languages(s):', stringifyLanguages(audio, audio_lang))
-        Logger.write('Retaining audio language(s):', stringifyLanguages(audio_lang))
-
-        # Skip files that don't have the specified language audio tracks
-        if len(audio_lang) == 0:
-            Logger.write('ERROR: No audio tracks matching specified language(s) for', path, '... Skipping.', stderr=True)
-            continue
-
-        Logger.write('Filtering subtitle track(s)...')
-        subtitles_lang = filter(lambda x: x.language in SUBTITLE_LANG, subtitles)
-        Logger.write('Removing subtitle languages(s):', stringifyLanguages(subtitles, subtitles_lang))
-        Logger.write('Retaining subtitle language(s):', stringifyLanguages(subtitles))
-
-        # Log that the file doesn't have the specified language subtitle tracks
-        if len(subtitles_lang) == 0 and LOG_MISSING_SUBTITLE is True:
-            Logger.write('WARNING: No subtitle tracks matching specified language(s) for', path, stderr=True)
-
-        # Print tracks to retain
-        Logger.write('Number of audio tracks retained:', len(audio_lang))
-        Logger.write('Remuxing with the following audio track(s):')
-        for i in audio_lang:
-            Logger.write(i, indent=4)
-        Logger.write('Number of subtitle tracks retained:', len(subtitles_lang))
-        Logger.write('Remuxing with the following subtitle track(s):')
-        for i in subtitles_lang:
-            Logger.write(i, indent=4)
-
-        # Skip files that don't need processing
-        if len(audio) == len(audio_lang) and len(subtitles) == len(subtitles_lang) \
-                and RENAME_TV is False and RENAME_MOVIE is False:
-            Logger.write('Nothing to do for', path)
-            continue
-
-        # Build command
-        cmd = [ MKVMERGE_BIN, '--output' ]
-
-        target = path + '.tmp'
-        cmd.append(target)
-
-        if RENAME_TV is True:
-            drive, tail = os.path.splitdrive(path)
-            parent = os.path.split(os.path.dirname(tail))[-1]
-            name = NAME_RE.match(os.path.basename(tail)).group(1)
-	    cmd += [ '--title', parent + ': ' + name ]
-        elif RENAME_MOVIE is True:
-            name = NAME_RE.match(os.path.basename(path)).group(1)
-	    cmd += [ '--title', name ]
-
-        if len(audio_lang) > 0:
-            cmd += [ '--audio-tracks', ','.join([ str(i.id) for i in audio_lang ]) ]
-            for i in range(len(audio_lang)):
-                cmd += [ '--default-track', ':'.join([ str(audio_lang[i].id), '0' if i else '1' ]) ]
-
-        if len(subtitles_lang) > 0:
-            cmd+= [ '--subtitle-tracks', ','.join([ str(i.id) for i in subtitles_lang ]) ]
-            for i in range(len(subtitles_lang)):
-                cmd += [ '--default-track', ':'.join([ str(subtitles_lang[i].id), '0']) ]
-
-        cmd.append(path)
-
-        # Attempt to process file
-        Logger.write('Processing %s...' % (path))
-        if DRY_RUN is False:
-            try:
-                result = subprocess.check_output(cmd)
+    if DRY_RUN is False and RENAME_TV is True:
+        drive, tail = os.path.splitdrive(path)
+        parent = os.path.split(os.path.dirname(tail))[-1]
+        name = NAME_RE.match(os.path.basename(tail)).group(1)
+        title = TITLE_RE.findall(subprocess.check_output([MKVINFO_BIN, path]))
+        if not title or not title[0].strip() == name:
+            modifyCMD = [MKVPROPEDIT_BIN, path, "--set", "title=%s" % name]
+            Logger.write("Rename title of mkv to %s" % name)
+            try: subprocess.check_output(modifyCMD)
             except subprocess.CalledProcessError as e:
-                Logger.write('Remux of', path, 'failed!', stderr=True)
+                Logger.write('Modifying of', path, 'failed!', stderr=True)
                 Logger.write(e.cmd, stderr=True)
                 Logger.write(e.output, stderr=True)
-                continue
-            else:
-                Logger.write('Remux of', path, 'successful.')
+    
+    elif DRY_RUN is False and RENAME_MOVIE is True:
+        name = NAME_RE.match(os.path.basename(path)).group(1)
+        title = TITLE_RE.findall(subprocess.check_output([MKVINFO_BIN, path]))
+        if not title or not title[0].strip() == name:
+            modifyCMD = [MKVPROPEDIT_BIN, path, "--set", "title=%s" % name]
+            Logger.write("Rename title of mkv to %s" % name)
+            try: subprocess.check_output(modifyCMD)
+            except subprocess.CalledProcessError as e:
+                Logger.write('Modifying of', path, 'failed!', stderr=True)
+                Logger.write(e.cmd, stderr=True)
+                Logger.write(e.output, stderr=True)
 
-        # Preserve timestamp
-        if PRESERVE_TIMESTAMP is True:
-            Logger.write('Preserving timestamp of', path)
-            if DRY_RUN is False:
-                stat = os.stat(path)
-                os.utime(target, (stat.st_atime, stat.st_mtime))
+    # Find video, audio, and subtitle tracks
+    video = list()
+    audio = list()
+    subtitles = list()
+    Logger.write('Searching for video, audio, and subtitle tracks...')
+    for line in StringIO(result):
+        matches = AUDIO_RE.match(line)
+        if matches is not None:
+            audio.append(AudioTrack(**matches.groupdict()))
+            continue
 
-        # Overwrite original file
+        matches = SUBTITLE_RE.match(line)
+        if matches is not None:
+            subtitles.append(SubtitleTrack(**matches.groupdict()))
+            continue
+
+        matches = VIDEO_RE.match(line)
+        if matches is not None:
+            video.append(VideoTrack(**matches.groupdict()))
+            continue
+
+    Logger.write('Found video track(s):')
+    for i in video:
+        Logger.write(i, indent=4)
+    Logger.write('Found audio track(s):')
+    for i in audio:
+        Logger.write(i, indent=4)
+    Logger.write('Found subtitle track(s):')
+    for i in subtitles:
+        Logger.write(i, indent=4)
+
+    # Filter out tracks that don't match languages specified.
+    Logger.write('Filtering audio track(s)...')
+    audio_lang = filter(lambda x: x.language in AUDIO_LANG, audio)
+    Logger.write('Removing audio languages(s):', stringifyLanguages(audio, audio_lang))
+    Logger.write('Retaining audio language(s):', stringifyLanguages(audio_lang))
+
+    # Skip files that don't have the specified language audio tracks
+    if len(audio_lang) == 0:
+        Logger.write('ERROR: No audio tracks matching specified language(s) for', path, '... Skipping.', stderr=True)
+        continue
+
+    Logger.write('Filtering subtitle track(s)...')
+    subtitles_lang = filter(lambda x: x.language in SUBTITLE_LANG, subtitles)
+    Logger.write('Removing subtitle languages(s):', stringifyLanguages(subtitles, subtitles_lang))
+    Logger.write('Retaining subtitle language(s):', stringifyLanguages(subtitles))
+
+    # Log that the file doesn't have the specified language subtitle tracks
+    if len(subtitles_lang) == 0 and LOG_MISSING_SUBTITLE is True:
+        Logger.write('WARNING: No subtitle tracks matching specified language(s) for', path, stderr=True)
+
+    # Print tracks to retain
+    Logger.write('Number of audio tracks retained:', len(audio_lang))
+    Logger.write('Remuxing with the following audio track(s):')
+    for i in audio_lang:
+        Logger.write(i, indent=4)
+    Logger.write('Number of subtitle tracks retained:', len(subtitles_lang))
+    Logger.write('Remuxing with the following subtitle track(s):')
+    for i in subtitles_lang:
+        Logger.write(i, indent=4)
+
+    # Skip files that don't need processing
+    if len(audio) == len(audio_lang) and len(subtitles) == len(subtitles_lang):
+        Logger.write('Nothing to do for', path)
+        continue
+
+    # Build command
+    cmd = [ MKVMERGE_BIN, '--output' ]
+
+    target = path + '.tmp'
+    cmd.append(target)
+
+    if len(audio_lang) > 0:
+        cmd += [ '--audio-tracks', ','.join([ str(i.id) for i in audio_lang ]) ]
+        for i in range(len(audio_lang)):
+            cmd += [ '--default-track', ':'.join([ str(audio_lang[i].id), '0' if i else '1' ]) ]
+
+    if len(subtitles_lang) > 0:
+        cmd+= [ '--subtitle-tracks', ','.join([ str(i.id) for i in subtitles_lang ]) ]
+        for i in range(len(subtitles_lang)):
+            cmd += [ '--default-track', ':'.join([ str(subtitles_lang[i].id), '0']) ]
+
+    cmd.append(path)
+
+    # Attempt to process file
+    Logger.write('Processing %s...' % (path))
+    if DRY_RUN is False:
+        try:
+            result = subprocess.check_output(cmd)
+        except subprocess.CalledProcessError as e:
+            Logger.write('Remux of', path, 'failed!', stderr=True)
+            Logger.write(e.cmd, stderr=True)
+            Logger.write(e.output, stderr=True)
+            continue
+        else:
+            Logger.write('Remux of', path, 'successful.')
+
+    # Preserve timestamp
+    if PRESERVE_TIMESTAMP is True:
+        Logger.write('Preserving timestamp of', path)
         if DRY_RUN is False:
-            try:
-                os.unlink(path)
-            except:
-                os.unlink(target)
-                Logger.write('Renaming of', target, 'to', path, 'failed!', stderr=True)
-            else:
-                os.rename(target, path)
+            stat = os.stat(path)
+            os.utime(target, (stat.st_atime, stat.st_mtime))
+
+    # Overwrite original file
+    if DRY_RUN is False:
+        try:
+            os.unlink(path)
+        except:
+            os.unlink(target)
+            Logger.write('Renaming of', target, 'to', path, 'failed!', stderr=True)
+        else:
+            os.rename(target, path)
