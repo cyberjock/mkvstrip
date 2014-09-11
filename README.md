@@ -25,6 +25,7 @@ Future features to add:
 2.  Add a -f parameter to allow for providing a single filename from the command line instead of a directory.  Currently -d works for single file names.
 3.  It would be nice if the script would actually distinguish between when you are in dry run mode and it would have done something and when you wouldn't have made any changes and would at least provide a 1 or 2 line message appropriate.  For example, if a change would have been made say something like "changes are not being applied because you are in dry run mode" or "no changes made because no changes are necessary".  It is somewhat unintuitive to have it say " Nothing to do for /mnt/Entertainment/Movies/Whatever.mkv" just because it is in dry run mode.
 4.  If a file rename would have happened without dry run mode being enabled there is no log output.  But if you disable dry run mode then it renames it properly.  This should be logged if a change should have been made but wasn't.
+5.  Subtitles being streamed into the file.  If "Movie (1900).mkv" exists along with "Movie (1900).eng.srt" then assume the subtitle track needs to be added and add it as language english because that's what the file says it is.  Optionally we can also have it add subtitles as "und" if the filename doesn't specify a language.  After successful merging of the subtitle then delete the .srt file.
 
 I am not an expert python coder so any help with bugs or features from the community is much appreciated!
 
